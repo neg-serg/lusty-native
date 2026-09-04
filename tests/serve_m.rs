@@ -13,7 +13,11 @@ use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 
 fn root_dir() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("lusty_serve_m_{}", std::process::id()));
+    // One dir per call: integration tests run in parallel threads and a
+    // shared pid-based path made them race (empty listings under checkPhase).
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("lusty_serve_m_{}_{}", std::process::id(), n));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("subdir")).unwrap();
     std::fs::write(dir.join("alpha.txt"), b"hello").unwrap();
@@ -199,7 +203,9 @@ fn serve_m_returns_meta_per_index() {
 /// Fixture whose canonical (depth, name) order deliberately differs from the
 /// size and extension orders: a.txt (1 B), mm.md (5 B), z.txt (10 B).
 fn sorted_dir() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("lusty_serve_sort_{}", std::process::id()));
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("lusty_serve_sort_{}_{}", std::process::id(), n));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("a.txt"), b"x").unwrap();

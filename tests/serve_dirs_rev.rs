@@ -7,7 +7,11 @@ use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 
 fn root_dir() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("lusty_serve_dirs_rev_{}", std::process::id()));
+    // One dir per call: integration tests run in parallel threads and a
+    // shared pid-based path made them race.
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("lusty_serve_dirs_rev_{}_{}", std::process::id(), n));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("zeta_dir")).unwrap();
     std::fs::write(dir.join("alpha.txt"), b"hello").unwrap();
