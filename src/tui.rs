@@ -851,7 +851,7 @@ impl App {
                             }
                         }
                         if pos == self.selected {
-                            cell.push_str(&format!("{esc}[1;48;2;0;95;175;38;2;209;229;255m"));
+                            cell.push_str(&format!("{esc}[{}m", sel_style()));
                         } else {
                             let exec =
                                 e.kind == FileKind::File && is_exec(&root_path.join(&e.label));
@@ -863,7 +863,15 @@ impl App {
                             cell.push_str(icon_for(&e));
                             cell.push(' ');
                         }
-                        cell.push_str(&e.label);
+                        if let Some((ms, me)) = query_match(&e.label, &self.query) {
+                            cell.push_str(&e.label[..ms]);
+                            cell.push_str(&format!("{esc}[4m"));
+                            cell.push_str(&e.label[ms..me]);
+                            cell.push_str(&format!("{esc}[24m"));
+                            cell.push_str(&e.label[me..]);
+                        } else {
+                            cell.push_str(&e.label);
+                        }
                         if e.kind == FileKind::Dir && !self.icons {
                             cell.push('/');
                         }
@@ -981,6 +989,42 @@ impl App {
 
 /// Outer popup height: two border rows plus up to 12 content rows.
 const OUTER_ROWS: usize = 14;
+
+/// Selection style presets (LUSTY_SEL_STYLE=1..4): 1 blue (default),
+/// 2 cyan, 3 purple, 4 reverse-video. Returns the SGR params.
+fn sel_style() -> &'static str {
+    match std::env::var("LUSTY_SEL_STYLE").ok().as_deref() {
+        Some("2") => "1;48;2;0;110;160;38;2;232;255;255",
+        Some("3") => "1;48;2;94;53;177;38;2;255;255;255",
+        Some("4") => "7;2",
+        _ => "1;48;2;0;95;175;38;2;209;229;255",
+    }
+}
+
+/// Byte range of the first plain case-insensitive occurrence of `query` in
+/// the basename of `label`, or None. Like the nvim float, a query starting
+/// with '.' (dot-toggle) is ignored; non-ASCII labels are skipped so the
+/// byte offsets stay exact.
+fn query_match(label: &str, query: &str) -> Option<(usize, usize)> {
+    if query.is_empty() || query.starts_with('.') || !label.is_ascii() {
+        return None;
+    }
+    let base_len = label.rfind('/').map(|i| label.len() - i - 1).unwrap_or(label.len());
+    let base_start = label.len() - base_len;
+    let base = &label[base_start..];
+    let q = query.to_lowercase();
+    if let Some(pos) = base.to_lowercase().find(&q) {
+        let start = base_start + pos;
+        let end = start + q.len();
+        if end <= label.len() {
+            Some((start, end))
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
 
 const ICON_DIR: &str = "\u{f115}";
 const ICON_FILE: &str = "\u{f15b}";
