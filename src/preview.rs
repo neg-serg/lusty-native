@@ -218,7 +218,7 @@ mod tests {
         std::fs::create_dir_all(tmp.join("a/b")).unwrap();
         std::fs::write(tmp.join(".git"), b"gitdir: x").unwrap();
         let root = git_root(&tmp.join("a/b"));
-        assert_eq!(root, Some(tmp));
+        assert_eq!(root, Some(tmp.clone()));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
