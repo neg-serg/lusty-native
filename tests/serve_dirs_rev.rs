@@ -119,9 +119,11 @@ fn q_flags_inert_for_other_sorts() {
     let _ = lines.next().unwrap().unwrap(); // C line
 
     ask(&mut stdin, "Q\t0\t50\t\t1\t0\t0"); // ext sort, no flags
-    let plain = labels(&until_e(&mut lines));
+    let plain_resp = until_e(&mut lines);
+    let plain = labels(&plain_resp);
     ask(&mut stdin, "Q\t0\t50\t\t1\t1\t1"); // same sort, flags ignored
-    let flagged = labels(&until_e(&mut lines));
+    let flagged_resp = until_e(&mut lines);
+    let flagged = labels(&flagged_resp);
     assert_eq!(plain, flagged);
 
     close(&mut child, stdin);
