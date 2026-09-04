@@ -865,9 +865,13 @@ impl App {
                         }
                         if let Some((ms, me)) = query_match(&e.label, &self.query) {
                             cell.push_str(&e.label[..ms]);
-                            cell.push_str(&format!("{esc}[4m"));
+                            if theme().match_underline {
+                                cell.push_str(&format!("{esc}[4m"));
+                            }
                             cell.push_str(&e.label[ms..me]);
-                            cell.push_str(&format!("{esc}[24m"));
+                            if theme().match_underline {
+                                cell.push_str(&format!("{esc}[24m"));
+                            }
                             cell.push_str(&e.label[me..]);
                         } else {
                             cell.push_str(&e.label);
@@ -990,16 +994,99 @@ impl App {
 /// Outer popup height: two border rows plus up to 12 content rows.
 const OUTER_ROWS: usize = 14;
 
-/// Selection style presets (LUSTY_SEL_STYLE=1..4): 1 blue (default),
-/// 2 cyan, 3 purple, 4 reverse-video. Returns the SGR params.
-fn sel_style() -> &'static str {
-    match std::env::var("LUSTY_SEL_STYLE").ok().as_deref() {
-        Some("2") => "1;48;2;0;110;160;38;2;232;255;255",
-        Some("3") => "1;48;2;94;53;177;38;2;255;255;255",
-        Some("4") => "7;2",
-        _ => "1;48;2;0;95;175;38;2;209;229;255",
+/// Selection theme loaded from the Lusty TOML (env LUSTY_THEME, default
+/// ~/.config/lusty/theme.toml). The file uses the same simple key=value
+/// lines the nvim side reads, so both interfaces share one theme.
+struct Theme {
+    sel_bg: Option<[u8; 3]>,
+    sel_fg: Option<[u8; 3]>,
+    sel_bold: bool,
+    sel_reverse: bool,
+    match_underline: bool,
+}
+
+fn hex3(s: &str) -> Option<[u8; 3]> {
+    let s = s.trim_start_matches('#');
+    if s.len() != 6 {
+        return None;
+    }
+    Some([
+        u8::from_str_radix(&s[0..2], 16).ok()?,
+        u8::from_str_radix(&s[2..4], 16).ok()?,
+        u8::from_str_radix(&s[4..6], 16).ok()?,
+    ])
+}
+
+fn theme_default() -> Theme {
+    Theme {
+        sel_bg: Some([0x00, 0x5f, 0xaf]),
+        sel_fg: Some([0xd1, 0xe5, 0xff]),
+        sel_bold: true,
+        sel_reverse: false,
+        match_underline: true,
     }
 }
+
+fn load_theme() -> Theme {
+    let path = std::env::var("LUSTY_THEME")
+        .or_else(|_| std::env::var("HOME").map(|h| format!("{h}/.config/lusty/theme.toml")))
+        .unwrap_or_default();
+    let mut t = theme_default();
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return t;
+    };
+    let mut section = String::new();
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.starts_with('[') {
+            section = line[1..].trim_end_matches(']').to_string();
+            continue;
+        }
+        let Some((key, val)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let val = val.trim().trim_matches('"');
+        match (section.as_str(), key) {
+            ("lusty.selection", "bg") => t.sel_bg = hex3(val),
+            ("lusty.selection", "fg") => t.sel_fg = hex3(val),
+            ("lusty.selection", "bold") => t.sel_bold = val == "true",
+            ("lusty.selection", "reverse") => t.sel_reverse = val == "true",
+            ("lusty.match", "underline") => t.match_underline = val == "true",
+            _ => {}
+        }
+    }
+    t
+}
+
+static THEME: std::sync::OnceLock<Theme> = std::sync::OnceLock::new();
+fn theme() -> &'static Theme {
+    THEME.get_or_init(load_theme)
+}
+
+/// SGR params for the selected cell, built from the loaded theme (or a
+/// default neg-blue bar when no theme file is found).
+fn sel_style() -> String {
+    let mut s = String::new();
+    if theme().sel_bold {
+        s.push_str("1;");
+    }
+    if theme().sel_reverse {
+        s.push_str("7;");
+    }
+    if let Some([r, g, b]) = theme().sel_bg {
+        s.push_str(&format!("48;2;{};{};{};", r, g, b));
+    }
+    if let Some([r, g, b]) = theme().sel_fg {
+        s.push_str(&format!("38;2;{};{};{};", r, g, b));
+    }
+    if s.is_empty() {
+        s.push_str("1;48;2;0;95;175;38;2;209;229;255");
+    }
+    s.pop();
+    s
+}
+
 
 /// Byte range of the first plain case-insensitive occurrence of `query` in
 /// the basename of `label`, or None. Like the nvim float, a query starting
