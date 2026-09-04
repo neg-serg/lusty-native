@@ -10,6 +10,7 @@ mod fuzzy;
 mod glob;
 mod listing;
 mod mount;
+mod preview;
 mod rank;
 mod serve;
 mod tui;

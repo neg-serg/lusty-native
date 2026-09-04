@@ -103,6 +103,11 @@ pub struct App {
     sort_mode: u8,           // 0 name, 1 ext, 2 size, 3 time
     cols_mask: u8,           // long view fields: 1 perm, 2 user, 4 size, 8 time
     palette: Colors,
+    preview_on: bool,        // right preview pane (C-Space / Shift+P toggles)
+    preview_w: usize,        // pane width in columns
+    pane_kind: u8,           // 0 off, 1 dim text (git/man/info), 2 chafa art
+    pane: Vec<String>,       // pre-clipped pane rows (preview_w wide)
+    pane_key: Option<String>, // cache key: path + size + geometry
 }
 
 impl App {
@@ -134,6 +139,11 @@ impl App {
             sort_mode: 0,
             cols_mask: 15,
             palette,
+            preview_on: false,
+            preview_w: 40,
+            pane_kind: 0,
+            pane: Vec::new(),
+            pane_key: None,
         }
     }
 
@@ -527,12 +537,27 @@ impl App {
             None => w, // default: span the whole terminal width
         };
         self.box_w = outer_w.saturating_sub(2);
+        let envw = std::env::var("LUSTY_PREVIEW_WIDTH")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok());
+        let pw = envw.unwrap_or((self.box_w / 3).clamp(24, 80));
+        self.preview_w = pw.clamp(20, self.box_w.saturating_sub(21).max(20));
     }
 
     fn list_rows(&self) -> usize {
         // Content rows inside the borders minus the prompt line at the
         // bottom (box_h includes the two border rows).
         self.box_h.saturating_sub(3).max(1)
+    }
+
+    /// Width of the entry-grid area: the whole box, or the left part when
+    /// the right preview pane is shown (list + divider + pane = box_w).
+    fn content_w(&self) -> usize {
+        if self.preview_on {
+            self.box_w.saturating_sub(self.preview_w + 1)
+        } else {
+            self.box_w
+        }
     }
 
     /// 0-based screen row of the popup top border, fixed at startup to
@@ -544,7 +569,7 @@ impl App {
     /// Adaptive columns: as many as the content needs (ceil(total/rows)),
     /// no more than fit the popup width given the widest name (capped at 20).
     fn max_cols(&mut self) -> usize {
-        let w = self.box_w;
+        let w = self.content_w();
         let rows = self.list_rows();
         let total = self.ranked.len().max(1);
         let needed = total.div_ceil(rows).max(1);
@@ -555,10 +580,61 @@ impl App {
 
     fn col_width(&mut self) -> usize {
         let cols = self.max_cols();
-        let w = self.box_w;
+        let w = self.content_w();
         // pitch = col_w + 2 separator; ensure cols*col_w + 2*(cols-1) <= w
         let text_w = w.saturating_sub(2 * (cols - 1));
         (text_w / cols).max(6)
+    }
+
+    /// (Re)render the right preview pane for the current selection. Cheap:
+    /// a cache key (path, size, geometry) is compared first and external
+    /// commands only spawn when the selection actually changed.
+    fn refresh_pane(&mut self) {
+        let clear = |app: &mut Self| {
+            app.pane.clear();
+            app.pane_kind = 0;
+            app.pane_key = None;
+        };
+        if !self.preview_on || self.ranked.is_empty() || self.selected >= self.ranked.len() {
+            clear(self);
+            return;
+        }
+        let i = self.ranked[self.selected];
+        let e = self.listing()[i].clone();
+        let path = self.root.join(&e.label);
+        let len = std::fs::metadata(&path).ok().map(|m| m.len());
+        let rows = self.list_rows();
+        let pw = self.preview_w;
+        let key = format!(
+            "{}|{}|{}|{}|{}",
+            path.display(),
+            pw,
+            rows,
+            e.kind == FileKind::Dir,
+            len.map(|l| l.to_string()).unwrap_or_else(|| "?".to_string())
+        );
+        if self.pane_key.as_deref() == Some(key.as_str()) {
+            return;
+        }
+        let is_dir = e.kind == FileKind::Dir;
+        let pane = crate::preview::render(&path, is_dir, pw, rows);
+        let dim_code = format!("{}[38;2;140;150;165m", char::from_u32(0x1b).unwrap());
+        let mut out: Vec<String> = Vec::with_capacity(rows);
+        for src in pane.lines.iter().take(rows) {
+            let mut s = String::new();
+            if pane.dim {
+                s.push_str(&dim_code);
+            }
+            s.push_str(src);
+            ansi_pad(&mut s, pw);
+            out.push(s);
+        }
+        while out.len() < rows {
+            out.push(" ".repeat(pw));
+        }
+        self.pane = out;
+        self.pane_kind = if pane.dim { 1 } else { 2 };
+        self.pane_key = Some(key);
     }
 
     /// Widest label (in chars) over the full listing of the current root.
@@ -687,6 +763,12 @@ impl App {
                             }
                         }
                         (KeyCode::Char('/'), false) => self.slash_enter(),
+                        // Right preview pane: C-Space (NUL) or Shift+P toggles.
+                        (KeyCode::Char(' '), true) | (KeyCode::Char('P'), false) => {
+                            self.preview_on = !self.preview_on;
+                            self.pane_key = None;
+                            self.pane.clear();
+                        }
                         (KeyCode::Char(c), false) => {
                             if let Some(c) = normalize_query_char(c) {
                                 self.query.push(c);
@@ -716,9 +798,13 @@ impl App {
 
     fn draw(&mut self, out: &mut io::Stdout) -> io::Result<()> {
         self.ensure_ranked();
+        if self.preview_on {
+            self.refresh_pane();
+        }
         let root_path = self.root.clone();
         let esc = char::from_u32(0x1b).unwrap();
         let w = self.box_w;
+        let lw = self.content_w();
         let top = self.pop_top;
         let bh = self.box_h;
         let rows = self.list_rows();
@@ -726,7 +812,7 @@ impl App {
         let mut col_w = self.col_width();
         if self.long {
             cols = 1;
-            col_w = self.box_w;
+            col_w = lw;
         }
         let bg = "48;2;0;0;0"; // opaque black popup background
         let border = "38;2;108;126;150"; // #6c7e96 border colour
@@ -789,11 +875,29 @@ impl App {
                         line.push_str("  ");
                     }
                 }
+                if self.preview_on {
+                    // Left: the entry grid clipped to the list area.
+                    ansi_pad(&mut line, lw);
+                    frame.push_str(&line);
+                    line.clear();
+                    // Divider between list and preview pane.
+                    frame.push_str(&format!("{esc}[{border}m"));
+                    frame.push('\u{2502}'); // \u2502
+                    frame.push_str(&format!("{esc}[0m"));
+                    // Right: one pre-rendered pane row.
+                    if let Some(prow) = self.pane.get(r) {
+                        frame.push_str(prow);
+                    }
+                    frame.push_str(&format!("{esc}[{bg}m"));
+                } else {
+                    ansi_pad(&mut line, w);
+                    frame.push_str(&line);
+                }
             } else if r == rows {
                 line = self.prompt_line();
+                ansi_pad(&mut line, w);
+                frame.push_str(&line);
             }
-            ansi_pad(&mut line, w);
-            frame.push_str(&line);
             frame.push_str(&format!("{esc}[{border}m"));
             frame.push('\u{2502}'); // \u2502
             frame.push_str(&format!("{esc}[0m{esc}[K"));
@@ -924,7 +1028,7 @@ fn is_exec(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-fn ansi_pad(line: &mut String, width: usize) {
+pub(crate) fn ansi_pad(line: &mut String, width: usize) {
     let src: Vec<char> = line.chars().collect();
     let mut out = String::with_capacity(src.len() + width);
     let mut vis = 0usize;
