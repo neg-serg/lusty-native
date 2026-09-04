@@ -5,13 +5,17 @@
 //! (no terminal buffer involved):
 //!
 //!   E                     -> "C <total> <depth> <root>"  (ready)
-//!   Q <from> <to> <query> [sort]
+//!   Q <from> <to> <query> [sort] [dirs] [rev]
 //!                            -> "N <matched>", "W <maxw>", then
 //!                               "R <i> <kind> <label>\t<path>" rows for
 //!                               ranked indices in [from,to), then "E".
 //!                               sort is optional (default 0 = the canonical
 //!                               depth+name order): 1 ext, 2 size desc,
-//!                               3 time desc.
+//!                               3 time desc. dirs/rev are 0/1 (default 0)
+//!                               and mirror the standalone TUI: they only
+//!                               reshape the canonical order (sort 0) —
+//!                               dirs groups directories first per depth,
+//!                               rev reverses each depth group.
 //!   M <mask> <index>...    -> "K <index> <meta>" per entry index, then "E".
 //!                            <meta> is the eza -l field block selected by
 //!                            mask bits (1 perm, 2 user, 4 size, 8 time),
@@ -80,6 +84,8 @@ pub fn serve(
     // fill the memo (a fresh picker would list nothing until the first key).
     let mut memo_q = String::new();
     let mut memo_sort = 0u8;
+    let mut memo_dirs = false;
+    let mut memo_rev = false;
     let mut memo_hit = false;
     let mut memo_ranked: Vec<usize> = Vec::new();
     let mut memo_maxw: usize = 0;
@@ -101,9 +107,16 @@ pub fn serve(
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0)
                     .min(3);
-                if !memo_hit || query != memo_q || sort != memo_sort {
+                let dirs_first: bool = parts.get(5).map(|s| *s == "1").unwrap_or(false);
+                let reverse: bool = parts.get(6).map(|s| *s == "1").unwrap_or(false);
+                if !memo_hit
+                    || query != memo_q
+                    || sort != memo_sort
+                    || dirs_first != memo_dirs
+                    || reverse != memo_rev
+                {
                     memo_hit = true;
-                    if sort != memo_sort {
+                    if sort != memo_sort || dirs_first != memo_dirs || reverse != memo_rev {
                         if let Some(b) = &base {
                             entries = b.clone();
                         }
@@ -112,8 +125,15 @@ pub fn serve(
                                 base = Some(entries.clone());
                             }
                             apply_sort(&mut entries, &root, sort);
+                        } else if dirs_first || reverse {
+                            if base.is_none() {
+                                base = Some(entries.clone());
+                            }
+                            crate::listing::reorder(&mut entries, dirs_first, reverse);
                         }
                         memo_sort = sort;
+                        memo_dirs = dirs_first;
+                        memo_rev = reverse;
                     }
                     let (ranked, maxw) = if query.is_empty() {
                         let mw = entries
